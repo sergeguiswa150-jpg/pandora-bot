@@ -547,7 +547,7 @@ async def prospects_command(
     await update.message.reply_text(
         text
     )
-def main():
+async def main():
 
     application = (
         Application.builder()
@@ -590,4 +590,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
