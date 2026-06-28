@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -45,6 +46,27 @@ SERVICE = 5
 relay_sessions = {}
 
 user_data_storage = {}
+
+
+def get_port():
+    try:
+        return int(os.getenv("PORT", "8443"))
+    except ValueError:
+        return 8443
+
+
+def get_webhook_url():
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if webhook_url:
+        return webhook_url.rstrip("/") + f"/{TOKEN}"
+
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    if render_url:
+        return render_url.rstrip("/") + f"/{TOKEN}"
+
+    return None
+
+
 def calculate_score(pack, capital):
 
     score = 0
@@ -130,6 +152,9 @@ async def button_handler(
     user_id = query.from_user.id
 
     data = query.data
+
+    if not data:
+        return
 
     if data == "formation":
 
@@ -352,11 +377,23 @@ async def handle_message(
     user = update.effective_user
     user_id = user.id
 
-    message = update.message.text
+    if not update.message or not update.message.text:
+        return
+
+    message = update.message.text.strip()
+
+    if not message:
+        return
 
     if context.user_data.get(
         "waiting_objective"
     ):
+        if user_id not in user_data_storage:
+            await update.message.reply_text(
+                "La conversation a été réinitialisée. Veuillez relancer /start."
+            )
+            context.user_data.clear()
+            return
 
         level = user_data_storage[user_id]["level"]
 
@@ -586,7 +623,18 @@ async def main():
         f"{BOT_NAME} lancé avec succès."
     )
 
-    application.run_polling()
+    webhook_url = get_webhook_url()
+
+    if webhook_url and os.getenv("PORT"):
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=get_port(),
+            url_path=TOKEN,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+        )
+    else:
+        application.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
