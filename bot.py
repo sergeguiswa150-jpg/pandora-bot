@@ -1,301 +1,158 @@
-import os
-import asyncio
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+import logging
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
+import config
+from database import save_prospect, get_all_prospects
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+# Configuration des logs
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-ADMIN_ID = 6269793768
+# Dictionnaire pour suivre l'état des utilisateurs et le mode relais
+user_data_storage = {}
+active_relays = {} # format: {admin_id: target_user_id}
 
-user_states = {}
+# --- FONCTIONS DE CALCUL ---
+def calculate_score(pack, level):
+    score = 0
+    if pack == "Elite": score += 50
+    elif pack == "Pro": score += 30
+    else: score += 10
+    
+    if level == "Déjà rentable": score += 20
+    return score
 
+# --- COMMANDES ADMIN ---
+async def admin_prospects(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != config.ADMIN_ID: return
+    
+    prospects = get_all_prospects()
+    if not prospects:
+        await update.message.reply_text("Aucun prospect enregistré pour le moment.")
+        return
+    
+    text = "📋 *Liste des prospects (Triés par score) :*\n\n"
+    for p in prospects:
+        text += f"ID:{p[0]} | {p[1]} | Pack: {p[2]} | Score: {p[3]} | Statut: {p[4]}\n"
+    
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# =========================
-# START
-# =========================
+async def connect_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != config.ADMIN_ID: return
+    try:
+        target_id = int(context.args[0])
+        active_relays[config.ADMIN_ID] = target_id
+        await update.message.reply_text(f"✅ Mode Relais Activé avec {target_id}. Vos messages lui seront transmis.")
+    except:
+        await update.message.reply_text("Utilisation : /connect ID_TELEGRAM")
+
+async def disconnect_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != config.ADMIN_ID: return
+    active_relays.pop(config.ADMIN_ID, None)
+    await update.message.reply_text("❌ Mode Relais Désactivé.")
+
+# --- PARCOURS UTILISATEUR ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     keyboard = [
-        [InlineKeyboardButton("📈 Formation Trading", callback_data="formation")],
-        [InlineKeyboardButton("🤝 Service personnel", callback_data="service")],
-        [InlineKeyboardButton("💼 Opportunité commerciale", callback_data="business")],
-        [InlineKeyboardButton("📞 Contacter directement MrTech237", callback_data="contact")]
+        [InlineKeyboardButton("📈 Formation Trading", callback_data="start_formation")],
+        [InlineKeyboardButton("🤝 Service Personnel", callback_data="service_perso")],
+        [InlineKeyboardButton("📞 Contact Direct", callback_data="contact_direct")]
     ]
-
-    text = """
-👋 Bienvenue chez MrTech237.
-
-Je suis l'assistant automatique de MrTech237.
-
-Merci de sélectionner le motif de votre prise de contact.
-"""
-
+    reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        f"👋 Bienvenue chez *{config.BOT_NAME}*.\n\nJe suis l'assistant de MrTech237. Comment puis-je vous aider ?",
+        reply_markup=reply_markup, parse_mode="Markdown"
     )
 
-
-# =========================
-# BOUTONS
-# =========================
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    uid = query.from_user.id
 
-    user_id = query.from_user.id
-
-    if query.data == "formation":
-
-        user_states[user_id] = "formation"
-
+    if query.data == "start_formation":
         keyboard = [
-            [InlineKeyboardButton("🔰 Débutant", callback_data="niveau_debutant")],
-            [InlineKeyboardButton("📊 Intermédiaire", callback_data="niveau_intermediaire")],
-            [InlineKeyboardButton("📈 Avancé", callback_data="niveau_avance")],
-            [InlineKeyboardButton("💰 Déjà rentable", callback_data="niveau_rentable")]
+            [InlineKeyboardButton("Débutant", callback_data="lvl_Debutant"), 
+             InlineKeyboardButton("Intermédiaire", callback_data="lvl_Inter")],
+            [InlineKeyboardButton("Avancé", callback_data="lvl_Avance"), 
+             InlineKeyboardButton("Déjà rentable", callback_data="lvl_Rentable")]
         ]
+        await query.edit_message_text("Quel est votre niveau actuel ?", reply_markup=InlineKeyboardMarkup(keyboard))
 
-        await query.edit_message_text(
-            "Quel est votre niveau actuel en trading ?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif query.data.startswith("niveau_"):
-
-        niveau = query.data.replace("niveau_", "")
-        context.user_data["niveau"] = niveau
-
+    elif query.data.startswith("lvl_"):
+        user_data_storage[uid] = {"level": query.data.replace("lvl_", "")}
         keyboard = [
-            [InlineKeyboardButton("Starter - 100$", callback_data="pack_starter")],
-            [InlineKeyboardButton("Pro - 200$", callback_data="pack_pro")],
-            [InlineKeyboardButton("Elite - 500$", callback_data="pack_elite")]
+            [InlineKeyboardButton("Pack Starter (100$)", callback_data="pack_Starter")],
+            [InlineKeyboardButton("Pack Pro (200$)", callback_data="pack_Pro")],
+            [InlineKeyboardButton("Pack Elite (500$)", callback_data="pack_Elite")]
         ]
-
-        await query.edit_message_text(
-            "Quel pack souhaitez-vous recevoir ?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("Choisissez votre pack :", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("pack_"):
+        user_data_storage[uid]["pack"] = query.data.replace("pack_", "")
+        await query.edit_message_text("Quel est votre objectif principal (ex: Revenu complémentaire, Vivre du trading) ?")
+        user_data_storage[uid]["step"] = "awaiting_goal"
 
-        pack = query.data.replace("pack_", "")
-        context.user_data["pack"] = pack
-
-        avantages = {
-            "starter": """
-🔥 PACK STARTER - 100$
-
-✔ Formation 2 semaines
-✔ Bases du trading
-✔ Gestion du risque
-✔ Ebook offert
-✔ Groupe privé 1 mois
-""",
-
-            "pro": """
-🔥 PACK PRO - 200$
-
-✔ Formation 1 mois
-✔ Analyse technique avancée
-✔ Ebook Premium
-✔ Canal VIP 3 mois
-✔ Suivi hebdomadaire
-✔ Assistance privée
-""",
-
-            "elite": """
-🔥 PACK ELITE - 500$
-
-✔ Coaching personnalisé 3 mois
-✔ Sessions individuelles
-✔ Canal VIP Premium
-✔ Suivi des trades
-✔ Analyse de portefeuille
-✔ Support prioritaire
-✔ Stratégies avancées
-"""
-        }
-
-        await query.edit_message_text(
-            avantages[pack] +
-            """
-
-💳 Moyens de paiement acceptés :
-
-• MTN Mobile Money
-• Orange Money
-• PayPal
-• USDT
-• Bitcoin
-• Virement bancaire
-
-Veuillez maintenant décrire vos objectifs en trading.
-"""
-        )
-
-        user_states[user_id] = "objectif"
-
-    elif query.data == "service":
-
-        user_states[user_id] = "service"
-
-        await query.edit_message_text(
-            """
-Merci de décrire votre demande personnelle.
-
-Exemples :
-
-• partenariat
-• service informatique
-• collaboration
-• projet personnel
-• assistance technique
-"""
-        )
-
-    elif query.data == "business":
-
-        user_states[user_id] = "business"
-
-        await query.edit_message_text(
-            """
-Merci de décrire votre opportunité commerciale ou votre projet.
-"""
-        )
-
-    elif query.data == "contact":
-
-        user_states[user_id] = "contact"
-
-        await query.edit_message_text(
-            """
-Veuillez rédiger votre message destiné à MrTech237.
-"""
-        )
-
-
-# =========================
-# RECEPTION DES MESSAGES
-# =========================
-async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-    user_id = user.id
+# --- GESTION DES MESSAGES (RELAIS ET COLLECTE) ---
+async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     text = update.message.text
 
-    state = user_states.get(user_id, "general")
-
-    admin_message = f"""
-📩 Nouvelle demande
-
-👤 Nom : {user.full_name}
-🆔 ID : {user.id}
-📌 Username : @{user.username}
-
-📂 Catégorie : {state}
-
-📝 Message :
-
-{text}
-"""
-
-    if "niveau" in context.user_data:
-        admin_message += f"\n📊 Niveau : {context.user_data['niveau']}"
-
-    if "pack" in context.user_data:
-        admin_message += f"\n🎓 Pack : {context.user_data['pack']}"
-
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=admin_message
-    )
-
-    await update.message.reply_text(
-        """
-✅ Votre demande a bien été transmise à MrTech237.
-
-Vous recevrez une réponse dès que possible.
-
-Si votre demande est urgente, MrTech237 pourra vous contacter directement.
-"""
-    )
-
-
-# =========================
-# REPONDRE VIA LE BOT
-# =========================
-async def reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id != ADMIN_ID:
+    # 1. Mode Relais (Admin -> Client)
+    if uid == config.ADMIN_ID and config.ADMIN_ID in active_relays:
+        target_id = active_relays[config.ADMIN_ID]
+        try:
+            await context.bot.send_message(chat_id=target_id, text=f"💬 *MrTech237 :*\n{text}", parse_mode="Markdown")
+        except:
+            await update.message.reply_text("Impossible d'envoyer le message.")
         return
 
-    try:
-        user_id = int(context.args[0])
+    # 2. Mode Relais (Client -> Admin)
+    if uid != config.ADMIN_ID:
+        # Si un relais est actif pour cet utilisateur
+        for admin_id, target_id in active_relays.items():
+            if target_id == uid:
+                await context.bot.send_message(chat_id=admin_id, text=f"📩 *Réponse de {update.effective_user.full_name} :*\n{text}", parse_mode="Markdown")
+                return
 
-        message = " ".join(context.args[1:])
+    # 3. Collecte des données du formulaire
+    if uid in user_data_storage and user_data_storage[uid].get("step") == "awaiting_goal":
+        data = user_data_storage[uid]
+        goal = text
+        score = calculate_score(data['pack'], data['level'])
+        
+        # Sauvegarde BDD
+        save_prospect(uid, update.effective_user.username, update.effective_user.full_name, data['level'], data['pack'], goal, score)
+        
+        # Notification Admin
+        admin_notif = (f"🔥 *Nouveau Prospect !*\n\n"
+                       f"👤 Nom: {update.effective_user.full_name}\n"
+                       f"🆔 ID: `{uid}`\n"
+                       f"📊 Niveau: {data['level']}\n"
+                       f"📦 Pack: {data['pack']}\n"
+                       f"🎯 Objectif: {goal}\n"
+                       f"⭐ Score: {score}")
+        
+        await context.bot.send_message(chat_id=config.ADMIN_ID, text=admin_notif, parse_mode="Markdown")
+        
+        # Réponse au client + Paiement
+        await update.message.reply_text(f"Félicitations ! Votre demande pour le {data['pack']} a été reçue.")
+        await update.message.reply_text(config.PAYMENT_DETAILS, parse_mode="Markdown")
+        
+        del user_data_storage[uid]
 
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"""
-📩 Message de MrTech237
-
-{message}
-"""
-        )
-
-        await update.message.reply_text("✅ Message envoyé.")
-
-    except Exception:
-        await update.message.reply_text(
-            """
-Utilisation :
-
-/reply ID_UTILISATEUR votre message
-"""
-        )
-
-
-# =========================
-# MAIN
-# =========================
-async def main():
-
-    app = Application.builder().token(TOKEN).build()
+# --- MAIN ---
+def main():
+    app = Application.builder().token(config.TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("reply", reply_command))
+    app.add_handler(CommandHandler("prospects", admin_prospects))
+    app.add_handler(CommandHandler("connect", connect_relay))
+    app.add_handler(CommandHandler("disconnect", disconnect_relay))
+    
+    app.add_handler(CallbackQueryHandler(handle_callbacks))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
 
-    app.add_handler(CallbackQueryHandler(button))
+    print("🚀 MrTech237 Bot is running...")
+    app.run_polling()
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            receive_message
-        )
-    )
-
-    print("✅ MrTech237 Assistant démarré")
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
-
-    while True:
-        await asyncio.sleep(3600)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    main()
