@@ -19,50 +19,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.message.reply_text(
-        "Bienvenue chez Pandora 👋\n\nComment puis-je vous aider ?",
+        "Bienvenue sur le support Pandora 👋",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    responses = {
-        "connexion": (
-            "🔐 Problème de connexion\n\n"
-            "1. Vérifiez votre adresse email\n"
-            "2. Cliquez sur 'Mot de passe oublié'\n"
-            "3. Suivez les instructions reçues"
-        ),
-        "commande": (
-            "📦 Veuillez envoyer votre numéro de commande "
-            "afin que nous puissions vérifier son statut."
-        ),
-        "achat": (
-            "🛒 Pour acheter un produit :\n\n"
-            "1️⃣ Choisissez votre article\n"
-            "2️⃣ Ajoutez-le au panier\n"
-            "3️⃣ Validez votre commande"
-        ),
-        "conseiller": (
-            "📞 Votre demande a été enregistrée.\n"
-            "Un conseiller vous contactera prochainement."
-        ),
+    messages = {
+        "connexion": "Essayez la réinitialisation du mot de passe.",
+        "commande": "Veuillez envoyer votre numéro de commande.",
+        "achat": "Choisissez un produit puis ajoutez-le au panier.",
+        "conseiller": "Un conseiller vous contactera bientôt.",
     }
 
-    await query.edit_message_text(
-        responses.get(query.data, "Je n'ai pas compris votre demande.")
-    )
+    await query.edit_message_text(messages.get(query.data, "Option inconnue"))
 
 
 def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(buttons))
+    app.add_handler(CallbackQueryHandler(button))
 
-    print("Bot démarré avec succès...")
+    print("Bot lancé avec succès")
     app.run_polling()
 
 
