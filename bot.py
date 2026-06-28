@@ -1,158 +1,593 @@
+import asyncio
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-import config
-from database import save_prospect, get_all_prospects
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 
-# Configuration des logs
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    ConversationHandler,
+    filters
+)
 
-# Dictionnaire pour suivre l'état des utilisateurs et le mode relais
+from config import (
+    TOKEN,
+    ADMIN_ID,
+    BOT_NAME,
+    PAYMENT_METHODS
+)
+
+from payments import PACKS
+
+from database import (
+    add_prospect,
+    get_prospects,
+    update_status
+)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
+LEVEL = 1
+PACK = 2
+CAPITAL = 3
+OBJECTIVE = 4
+SERVICE = 5
+
+relay_sessions = {}
+
 user_data_storage = {}
-active_relays = {} # format: {admin_id: target_user_id}
+def calculate_score(pack, capital):
 
-# --- FONCTIONS DE CALCUL ---
-def calculate_score(pack, level):
     score = 0
-    if pack == "Elite": score += 50
-    elif pack == "Pro": score += 30
-    else: score += 10
-    
-    if level == "Déjà rentable": score += 20
+
+    if pack == "starter":
+        score += 1
+
+    elif pack == "pro":
+        score += 3
+
+    elif pack == "elite":
+        score += 5
+
+    if capital == "<100":
+        score += 1
+
+    elif capital == "100-500":
+        score += 2
+
+    elif capital == "500-2000":
+        score += 4
+
+    elif capital == ">2000":
+        score += 6
+
     return score
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
-# --- COMMANDES ADMIN ---
-async def admin_prospects(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.ADMIN_ID: return
-    
-    prospects = get_all_prospects()
-    if not prospects:
-        await update.message.reply_text("Aucun prospect enregistré pour le moment.")
-        return
-    
-    text = "📋 *Liste des prospects (Triés par score) :*\n\n"
-    for p in prospects:
-        text += f"ID:{p[0]} | {p[1]} | Pack: {p[2]} | Score: {p[3]} | Statut: {p[4]}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-async def connect_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.ADMIN_ID: return
-    try:
-        target_id = int(context.args[0])
-        active_relays[config.ADMIN_ID] = target_id
-        await update.message.reply_text(f"✅ Mode Relais Activé avec {target_id}. Vos messages lui seront transmis.")
-    except:
-        await update.message.reply_text("Utilisation : /connect ID_TELEGRAM")
-
-async def disconnect_relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != config.ADMIN_ID: return
-    active_relays.pop(config.ADMIN_ID, None)
-    await update.message.reply_text("❌ Mode Relais Désactivé.")
-
-# --- PARCOURS UTILISATEUR ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📈 Formation Trading", callback_data="start_formation")],
-        [InlineKeyboardButton("🤝 Service Personnel", callback_data="service_perso")],
-        [InlineKeyboardButton("📞 Contact Direct", callback_data="contact_direct")]
+        [
+            InlineKeyboardButton(
+                "📈 Formation Trading",
+                callback_data="formation"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🤝 Service personnel",
+                callback_data="service"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "💼 Opportunité commerciale",
+                callback_data="business"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📞 Contacter directement MrTech237",
+                callback_data="contact"
+            )
+        ]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+
     await update.message.reply_text(
-        f"👋 Bienvenue chez *{config.BOT_NAME}*.\n\nJe suis l'assistant de MrTech237. Comment puis-je vous aider ?",
-        reply_markup=reply_markup, parse_mode="Markdown"
+        f"""
+👋 Bienvenue chez {BOT_NAME}
+
+Je suis l'assistant automatique de MrTech237.
+
+Veuillez choisir le motif de votre prise de contact.
+""",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        )
+    )
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user_id = query.from_user.id
+
+    data = query.data
+
+    if data == "formation":
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🔰 Débutant",
+                    callback_data="level_beginner"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "📊 Intermédiaire",
+                    callback_data="level_intermediate"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "📈 Avancé",
+                    callback_data="level_advanced"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "💰 Déjà rentable",
+                    callback_data="level_profitable"
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            """
+📈 FORMATION TRADING
+
+Quel est votre niveau actuel en trading ?
+""",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        return
+
+    if data.startswith("level_"):
+
+        level = data.replace(
+            "level_",
+            ""
+        )
+
+        user_data_storage[user_id] = {
+            "level": level
+        }
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Starter - 100$",
+                    callback_data="pack_starter"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "Pro - 200$",
+                    callback_data="pack_pro"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "Elite - 500$",
+                    callback_data="pack_elite"
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            """
+Choisissez le programme qui vous intéresse :
+""",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        return
+
+    if data.startswith("pack_"):
+
+        pack = data.replace(
+            "pack_",
+            ""
+        )
+
+        user_data_storage[user_id]["pack"] = pack
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "<100$",
+                    callback_data="capital_<100"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "100$ - 500$",
+                    callback_data="capital_100-500"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    "500$ - 2000$",
+                    callback_data="capital_500-2000"
+                )
+            ],
+
+            [
+                InlineKeyboardButton(
+                    ">2000$",
+                    callback_data="capital_>2000"
+                )
+            ]
+        ]
+
+        await query.edit_message_text(
+            f"""
+🎓 Pack sélectionné : {pack.upper()}
+
+💵 Prix : {PACKS[pack]['price']}
+
+{PACKS[pack]['advantages']}
+
+Quel est votre capital actuel ?
+""",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            )
+        )
+
+        return
+    if data.startswith("capital_"):
+
+        capital = data.replace(
+            "capital_",
+            ""
+        )
+
+        user_data_storage[user_id]["capital"] = capital
+
+        await query.edit_message_text(
+            """
+🎯 Décris maintenant :
+
+• ton objectif en trading
+• ce que tu souhaites apprendre
+• tes attentes concernant la formation
+
+Écris simplement ton message ci-dessous.
+"""
+        )
+
+        context.user_data["waiting_objective"] = True
+
+        return
+
+    if data == "service":
+
+        context.user_data["service_request"] = True
+
+        await query.edit_message_text(
+            """
+🤝 SERVICE PERSONNEL
+
+Merci de décrire précisément votre demande.
+Votre message sera transmis directement à MrTech237.
+"""
+        )
+
+        return
+
+    if data == "business":
+
+        context.user_data["business_request"] = True
+
+        await query.edit_message_text(
+            """
+💼 OPPORTUNITÉ COMMERCIALE
+
+Merci de présenter votre projet ou votre proposition.
+Votre message sera transmis à MrTech237.
+"""
+        )
+
+        return
+
+    if data == "contact":
+
+        context.user_data["direct_contact"] = True
+
+        await query.edit_message_text(
+            """
+📞 CONTACT DIRECT
+
+Merci de rédiger votre message destiné à MrTech237.
+"""
+        )
+
+        return
+async def handle_message(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+    user_id = user.id
+
+    message = update.message.text
+
+    if context.user_data.get(
+        "waiting_objective"
+    ):
+
+        level = user_data_storage[user_id]["level"]
+
+        pack = user_data_storage[user_id]["pack"]
+
+        capital = user_data_storage[user_id]["capital"]
+
+        score = calculate_score(
+            pack,
+            capital
+        )
+
+        add_prospect(
+            telegram_id=user_id,
+            username=user.username,
+            fullname=user.full_name,
+            category="formation",
+            level=level,
+            pack=pack,
+            capital=capital,
+            message=message,
+            score=score
+        )
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"""
+🔥 Nouveau prospect formation
+
+👤 Nom : {user.full_name}
+
+🆔 ID : {user_id}
+
+📊 Niveau : {level}
+
+🎓 Pack : {pack}
+
+💰 Capital : {capital}
+
+⭐ Score : {score}
+
+📝 Objectif :
+
+{message}
+"""
+        )
+
+        await update.message.reply_text(
+            f"""
+✅ Merci pour ces informations.
+
+Votre demande a été transmise à MrTech237.
+
+💳 Moyens de paiement :
+
+{PAYMENT_METHODS}
+
+MrTech237 vous contactera rapidement.
+"""
+        )
+
+        context.user_data.clear()
+
+        return
+    if context.user_data.get(
+        "service_request"
+    ):
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"""
+🤝 Nouveau service personnel
+
+👤 {user.full_name}
+
+🆔 {user_id}
+
+📝 Message :
+
+{message}
+"""
+        )
+
+        await update.message.reply_text(
+            """
+✅ Votre demande a été transmise à MrTech237.
+
+Vous recevrez une réponse dès que possible.
+"""
+        )
+
+        context.user_data.clear()
+
+        return
+    if context.user_data.get(
+        "business_request"
+    ):
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"""
+💼 Nouvelle opportunité commerciale
+
+👤 {user.full_name}
+
+🆔 {user_id}
+
+📝 Message :
+
+{message}
+"""
+        )
+
+        await update.message.reply_text(
+            """
+✅ Votre proposition commerciale a été transmise à MrTech237.
+
+Vous recevrez une réponse dès que possible.
+"""
+        )
+
+        context.user_data.clear()
+
+        return
+
+
+    if context.user_data.get(
+        "direct_contact"
+    ):
+
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"""
+📞 Nouvelle demande de contact direct
+
+👤 {user.full_name}
+
+🆔 {user_id}
+
+📝 Message :
+
+{message}
+"""
+        )
+
+        await update.message.reply_text(
+            """
+✅ Votre message a été transmis à MrTech237.
+
+Il vous répondra dès que possible.
+"""
+        )
+
+        context.user_data.clear()
+
+        return
+async def prospects_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if update.effective_user.id != ADMIN_ID:
+
+        return
+
+    prospects = get_prospects()
+
+    if not prospects:
+
+        await update.message.reply_text(
+            "Aucun prospect enregistré."
+        )
+
+        return
+
+    text = "📊 LISTE DES PROSPECTS\n\n"
+
+    for prospect in prospects:
+
+        text += (
+            f"👤 {prospect['fullname']}\n"
+            f"⭐ Score : {prospect['score']}\n"
+            f"📈 Pack : {prospect['pack']}\n"
+            f"💰 Capital : {prospect['capital']}\n"
+            f"----------------------\n"
+        )
+
+    await update.message.reply_text(
+        text
+    )
+def main():
+
+    application = (
+        Application.builder()
+        .token(TOKEN)
+        .build()
     )
 
-async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    uid = query.from_user.id
+    application.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
 
-    if query.data == "start_formation":
-        keyboard = [
-            [InlineKeyboardButton("Débutant", callback_data="lvl_Debutant"), 
-             InlineKeyboardButton("Intermédiaire", callback_data="lvl_Inter")],
-            [InlineKeyboardButton("Avancé", callback_data="lvl_Avance"), 
-             InlineKeyboardButton("Déjà rentable", callback_data="lvl_Rentable")]
-        ]
-        await query.edit_message_text("Quel est votre niveau actuel ?", reply_markup=InlineKeyboardMarkup(keyboard))
+    application.add_handler(
+        CommandHandler(
+            "prospects",
+            prospects_command
+        )
+    )
 
-    elif query.data.startswith("lvl_"):
-        user_data_storage[uid] = {"level": query.data.replace("lvl_", "")}
-        keyboard = [
-            [InlineKeyboardButton("Pack Starter (100$)", callback_data="pack_Starter")],
-            [InlineKeyboardButton("Pack Pro (200$)", callback_data="pack_Pro")],
-            [InlineKeyboardButton("Pack Elite (500$)", callback_data="pack_Elite")]
-        ]
-        await query.edit_message_text("Choisissez votre pack :", reply_markup=InlineKeyboardMarkup(keyboard))
+    application.add_handler(
+        CallbackQueryHandler(
+            button_handler
+        )
+    )
 
-    elif query.data.startswith("pack_"):
-        user_data_storage[uid]["pack"] = query.data.replace("pack_", "")
-        await query.edit_message_text("Quel est votre objectif principal (ex: Revenu complémentaire, Vivre du trading) ?")
-        user_data_storage[uid]["step"] = "awaiting_goal"
+    application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_message
+        )
+    )
 
-# --- GESTION DES MESSAGES (RELAIS ET COLLECTE) ---
-async def handle_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    text = update.message.text
+    print(
+        f"{BOT_NAME} lancé avec succès."
+    )
 
-    # 1. Mode Relais (Admin -> Client)
-    if uid == config.ADMIN_ID and config.ADMIN_ID in active_relays:
-        target_id = active_relays[config.ADMIN_ID]
-        try:
-            await context.bot.send_message(chat_id=target_id, text=f"💬 *MrTech237 :*\n{text}", parse_mode="Markdown")
-        except:
-            await update.message.reply_text("Impossible d'envoyer le message.")
-        return
+    application.run_polling()
 
-    # 2. Mode Relais (Client -> Admin)
-    if uid != config.ADMIN_ID:
-        # Si un relais est actif pour cet utilisateur
-        for admin_id, target_id in active_relays.items():
-            if target_id == uid:
-                await context.bot.send_message(chat_id=admin_id, text=f"📩 *Réponse de {update.effective_user.full_name} :*\n{text}", parse_mode="Markdown")
-                return
 
-    # 3. Collecte des données du formulaire
-    if uid in user_data_storage and user_data_storage[uid].get("step") == "awaiting_goal":
-        data = user_data_storage[uid]
-        goal = text
-        score = calculate_score(data['pack'], data['level'])
-        
-        # Sauvegarde BDD
-        save_prospect(uid, update.effective_user.username, update.effective_user.full_name, data['level'], data['pack'], goal, score)
-        
-        # Notification Admin
-        admin_notif = (f"🔥 *Nouveau Prospect !*\n\n"
-                       f"👤 Nom: {update.effective_user.full_name}\n"
-                       f"🆔 ID: `{uid}`\n"
-                       f"📊 Niveau: {data['level']}\n"
-                       f"📦 Pack: {data['pack']}\n"
-                       f"🎯 Objectif: {goal}\n"
-                       f"⭐ Score: {score}")
-        
-        await context.bot.send_message(chat_id=config.ADMIN_ID, text=admin_notif, parse_mode="Markdown")
-        
-        # Réponse au client + Paiement
-        await update.message.reply_text(f"Félicitations ! Votre demande pour le {data['pack']} a été reçue.")
-        await update.message.reply_text(config.PAYMENT_DETAILS, parse_mode="Markdown")
-        
-        del user_data_storage[uid]
-
-# --- MAIN ---
-def main():
-    app = Application.builder().token(config.TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("prospects", admin_prospects))
-    app.add_handler(CommandHandler("connect", connect_relay))
-    app.add_handler(CommandHandler("disconnect", disconnect_relay))
-    
-    app.add_handler(CallbackQueryHandler(handle_callbacks))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_messages))
-
-    print("🚀 MrTech237 Bot is running...")
-    app.run_polling()
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
